@@ -85,6 +85,15 @@ type Point = {
   y: number
 }
 
+type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w'
+
+type TransformRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 type Preferences = {
   theme: 'light' | 'dark'
   accent: string
@@ -133,10 +142,12 @@ const activeMenu = ref('')
 const fullscreen = ref(false)
 const previewMode = ref(false)
 const dragState = shallowRef<{
-  type: 'paint' | 'move' | 'marquee' | 'pan'
+  type: 'paint' | 'move' | 'resize' | 'marquee' | 'pan'
   start: Point
   last: Point
   layerStart?: Point
+  layerStartTransform?: TransformRect
+  resizeHandle?: ResizeHandle
   panStart?: Point
   scratch?: HTMLCanvasElement
 } | null>(null)
@@ -208,6 +219,55 @@ const activeDocument = computed(() =>
 const activeLayer = computed(() => {
   const doc = activeDocument.value
   return doc ? getActiveLayer(doc) : null
+})
+const activeShapeLayer = computed(() => {
+  const layer = activeLayer.value
+  return layer?.type === 'shape' ? layer : null
+})
+const activeTextLayer = computed(() => {
+  const layer = activeLayer.value
+  return layer?.type === 'text' ? layer : null
+})
+const activeFrameLayer = computed(() => {
+  const layer = activeLayer.value
+  return layer?.type === 'frame' ? layer : null
+})
+const resizeHandles: ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+const canvasWrapStyle = computed(() => {
+  const doc = activeDocument.value
+  if (!doc) return {}
+  const layer = activeLayer.value
+  const zoom = doc.viewport.zoom
+  const margin = 36
+  const offsetX = layer ? Math.max(0, -layer.transform.x * zoom + margin) : 0
+  const offsetY = layer ? Math.max(0, -layer.transform.y * zoom + margin) : 0
+  const right = layer
+    ? Math.max(doc.width, layer.transform.x + layer.transform.width + margin / zoom)
+    : doc.width
+  const bottom = layer
+    ? Math.max(doc.height, layer.transform.y + layer.transform.height + margin / zoom)
+    : doc.height
+  return {
+    width: `${offsetX + right * zoom}px`,
+    height: `${offsetY + bottom * zoom}px`,
+    paddingLeft: `${offsetX}px`,
+    paddingTop: `${offsetY}px`
+  }
+})
+const transformOverlayStyle = computed(() => {
+  const doc = activeDocument.value
+  const layer = activeLayer.value
+  if (!doc || !layer || !layer.visible) return null
+  const zoom = doc.viewport.zoom
+  const margin = 36
+  const offsetX = Math.max(0, -layer.transform.x * zoom + margin)
+  const offsetY = Math.max(0, -layer.transform.y * zoom + margin)
+  return {
+    left: `${offsetX + layer.transform.x * zoom}px`,
+    top: `${offsetY + layer.transform.y * zoom}px`,
+    width: `${layer.transform.width * zoom}px`,
+    height: `${layer.transform.height * zoom}px`
+  }
 })
 const canUndo = computed(() => !!activeDocument.value && activeDocument.value.history.length > 1)
 const canRedo = computed(() => !!activeDocument.value && activeDocument.value.redo.length > 0)
@@ -341,6 +401,8 @@ watch(prefs, (value) => {
 
 let renderQueued = false
 let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+let globalPointerMoveHandler: ((event: PointerEvent) => void) | null = null
+let globalPointerEndHandler: ((event: PointerEvent) => void) | null = null
 
 function setError(message: string) {
   errorMessage.value = message
@@ -390,6 +452,32 @@ function scheduleAutosave() {
     })
     localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({ at: new Date().toISOString(), documents: serializable }))
   }, prefs.value.autoSaveMs)
+}
+
+function cleanupGlobalPointerListeners() {
+  if (globalPointerMoveHandler) {
+    window.removeEventListener('pointermove', globalPointerMoveHandler)
+    globalPointerMoveHandler = null
+  }
+  if (globalPointerEndHandler) {
+    window.removeEventListener('pointerup', globalPointerEndHandler)
+    window.removeEventListener('pointercancel', globalPointerEndHandler)
+    globalPointerEndHandler = null
+  }
+}
+
+function bindGlobalPointerListeners() {
+  cleanupGlobalPointerListeners()
+  globalPointerMoveHandler = (event: PointerEvent) => {
+    void pointerMove(event)
+  }
+  globalPointerEndHandler = (event: PointerEvent) => {
+    event.preventDefault()
+    void pointerUp()
+  }
+  window.addEventListener('pointermove', globalPointerMoveHandler)
+  window.addEventListener('pointerup', globalPointerEndHandler)
+  window.addEventListener('pointercancel', globalPointerEndHandler)
 }
 
 async function imageFromSource(source: string) {
@@ -567,6 +655,42 @@ function drawSelection(ctx: CanvasRenderingContext2D, doc: EditorDocument) {
     ctx.strokeRect(selection.x, selection.y, selection.width, selection.height)
   }
   ctx.restore()
+}
+
+function handleSizeForZoom(doc: EditorDocument) {
+  return Math.max(6, 10 / Math.max(0.1, doc.viewport.zoom))
+}
+
+function layerRect(layer: EditorLayer): TransformRect {
+  return {
+    x: layer.transform.x,
+    y: layer.transform.y,
+    width: layer.transform.width,
+    height: layer.transform.height
+  }
+}
+
+function resizeHandlePoints(rect: TransformRect): Array<{ handle: ResizeHandle; x: number; y: number }> {
+  const midX = rect.x + rect.width / 2
+  const midY = rect.y + rect.height / 2
+  const right = rect.x + rect.width
+  const bottom = rect.y + rect.height
+  return [
+    { handle: 'nw', x: rect.x, y: rect.y },
+    { handle: 'n', x: midX, y: rect.y },
+    { handle: 'ne', x: right, y: rect.y },
+    { handle: 'e', x: right, y: midY },
+    { handle: 'se', x: right, y: bottom },
+    { handle: 's', x: midX, y: bottom },
+    { handle: 'sw', x: rect.x, y: bottom },
+    { handle: 'w', x: rect.x, y: midY }
+  ]
+}
+
+function transformHandleStyle(handle: ResizeHandle) {
+  const x = handle.includes('w') ? '0%' : handle.includes('e') ? '100%' : '50%'
+  const y = handle.includes('n') ? '0%' : handle.includes('s') ? '100%' : '50%'
+  return { left: x, top: y }
 }
 
 async function render(targetCanvas = canvasRef.value, includeUi = true, doc = activeDocument.value, updateNavigator = true) {
@@ -1159,9 +1283,96 @@ function docPointFromPointer(event: PointerEvent): Point {
   }
 }
 
+function pointInLayer(point: Point, layer: EditorLayer) {
+  const rect = layerRect(layer)
+  return point.x >= rect.x && point.x <= rect.x + rect.width && point.y >= rect.y && point.y <= rect.y + rect.height
+}
+
+function hitTestLayer(doc: EditorDocument, point: Point) {
+  for (let index = doc.layers.length - 1; index >= 0; index -= 1) {
+    const layer = doc.layers[index]
+    if (!layer.visible || layer.opacity <= 0) continue
+    if (pointInLayer(point, layer)) return layer
+  }
+  return null
+}
+
+function hitTestResizeHandle(doc: EditorDocument, point: Point) {
+  const layer = getActiveLayer(doc)
+  if (!layer || !layer.visible || layer.locked || layer.positionLocked) return null
+  const handleSize = handleSizeForZoom(doc) * 1.6
+  for (const item of resizeHandlePoints(layerRect(layer))) {
+    if (Math.abs(point.x - item.x) <= handleSize && Math.abs(point.y - item.y) <= handleSize) {
+      return item.handle
+    }
+  }
+  return null
+}
+
+function resizeTransform(start: TransformRect, handle: ResizeHandle, point: Point, anchor: Point, keepAspect: boolean) {
+  const next = { ...start }
+  const dx = point.x - anchor.x
+  const dy = point.y - anchor.y
+  const minSize = 4
+
+  if (handle.includes('e')) next.width = start.width + dx
+  if (handle.includes('s')) next.height = start.height + dy
+  if (handle.includes('w')) {
+    next.x = start.x + dx
+    next.width = start.width - dx
+  }
+  if (handle.includes('n')) {
+    next.y = start.y + dy
+    next.height = start.height - dy
+  }
+
+  if (keepAspect && handle.length === 2 && start.height !== 0) {
+    const ratio = start.width / start.height
+    if (Math.abs(dx) > Math.abs(dy)) {
+      next.height = Math.max(minSize, Math.abs(next.width / ratio))
+      if (handle.includes('n')) next.y = start.y + start.height - next.height
+    } else {
+      next.width = Math.max(minSize, Math.abs(next.height * ratio))
+      if (handle.includes('w')) next.x = start.x + start.width - next.width
+    }
+  }
+
+  if (next.width < minSize) {
+    if (handle.includes('w')) next.x = start.x + start.width - minSize
+    next.width = minSize
+  }
+  if (next.height < minSize) {
+    if (handle.includes('n')) next.y = start.y + start.height - minSize
+    next.height = minSize
+  }
+
+  return next
+}
+
+function startResizeFromHandle(event: PointerEvent, handle: ResizeHandle) {
+  const doc = requireDocument()
+  const layer = getActiveLayer(doc)
+  if (!layer || layer.locked || layer.positionLocked) {
+    setError('The active layer is locked')
+    return
+  }
+  const point = docPointFromPointer(event)
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
+  activeTool.value = 'move'
+  dragState.value = {
+    type: 'resize',
+    start: point,
+    last: point,
+    resizeHandle: handle,
+    layerStartTransform: layerRect(layer)
+  }
+  bindGlobalPointerListeners()
+}
+
 async function pointerDown(event: PointerEvent) {
   const doc = requireDocument()
   const point = docPointFromPointer(event)
+  ;(event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId)
   if (activeTool.value === 'hand') {
     dragState.value = { type: 'pan', start: point, last: point, panStart: { x: doc.viewport.panX, y: doc.viewport.panY } }
     return
@@ -1172,7 +1383,26 @@ async function pointerDown(event: PointerEvent) {
     return
   }
   if (activeTool.value === 'move') {
-    const layer = getActiveLayer(doc)
+    const handle = hitTestResizeHandle(doc, point)
+    if (handle) {
+      const layer = getActiveLayer(doc)
+      if (!layer) return
+      dragState.value = {
+        type: 'resize',
+        start: point,
+        last: point,
+        resizeHandle: handle,
+        layerStartTransform: layerRect(layer)
+      }
+      bindGlobalPointerListeners()
+      return
+    }
+
+    const hitLayer = hitTestLayer(doc, point)
+    if (hitLayer) {
+      setActiveLayer(doc, hitLayer.id, event.shiftKey)
+    }
+    const layer = hitLayer || getActiveLayer(doc)
     if (!layer || layer.locked || layer.positionLocked) return
     dragState.value = { type: 'move', start: point, last: point, layerStart: { x: layer.transform.x, y: layer.transform.y } }
     return
@@ -1209,6 +1439,10 @@ async function pointerDown(event: PointerEvent) {
     return
   }
   if (activeTool.value === 'fill') {
+    const hitLayer = hitTestLayer(doc, point)
+    if (hitLayer) {
+      setActiveLayer(doc, hitLayer.id)
+    }
     await floodFill(point)
     return
   }
@@ -1251,6 +1485,19 @@ async function pointerMove(event: PointerEvent) {
       layer.transform.x = state.layerStart.x + point.x - state.start.x
       layer.transform.y = state.layerStart.y + point.y - state.start.y
     }
+    state.last = point
+    scheduleRender()
+    return
+  }
+  if (state.type === 'resize') {
+    const layer = getActiveLayer(doc)
+    if (!layer || !state.layerStartTransform || !state.resizeHandle) return
+    const next = resizeTransform(state.layerStartTransform, state.resizeHandle, point, state.start, event.shiftKey)
+    layer.transform.x = next.x
+    layer.transform.y = next.y
+    layer.transform.width = next.width
+    layer.transform.height = next.height
+    state.last = point
     scheduleRender()
     return
   }
@@ -1263,17 +1510,27 @@ async function pointerMove(event: PointerEvent) {
 async function pointerUp() {
   const doc = activeDocument.value
   const state = dragState.value
-  if (!doc || !state) return
+  if (!doc || !state) {
+    cleanupGlobalPointerListeners()
+    return
+  }
   if (state.type === 'paint') {
     const layer = await ensureRasterLayer(getActiveLayer(doc))
     layer.dataUrl = state.scratch!.toDataURL('image/png')
     pushHistory(doc, activeTool.value === 'eraser' ? 'Erase stroke' : 'Brush stroke')
   } else if (state.type === 'move') {
-    pushHistory(doc, activeTool.value === 'shape' ? 'Draw shape' : 'Move layer')
+    if (Math.hypot(state.last.x - state.start.x, state.last.y - state.start.y) > 0.5) {
+      pushHistory(doc, activeTool.value === 'shape' ? 'Draw shape' : 'Move layer')
+    }
+  } else if (state.type === 'resize') {
+    if (Math.hypot(state.last.x - state.start.x, state.last.y - state.start.y) > 0.5) {
+      pushHistory(doc, 'Resize layer')
+    }
   } else if (state.type === 'marquee') {
     pushHistory(doc, 'Create selection')
   }
   dragState.value = null
+  cleanupGlobalPointerListeners()
 }
 
 async function paintPoint(point: Point, pressure = 1) {
@@ -1309,13 +1566,53 @@ async function paintLine(from: Point, to: Point, pressure = 1) {
 
 async function floodFill(point: Point) {
   const doc = requireDocument()
-  const layer = await ensureRasterLayer(getActiveLayer(doc))
+  const active = getActiveLayer(doc)
+  if (!active) {
+    setError('No active layer to fill')
+    return
+  }
+  if (active.locked) {
+    setError('The active layer is locked')
+    return
+  }
+  if (active.type === 'shape') {
+    if (active.shape === 'line' || active.shape === 'arrow') {
+      active.stroke = toolOptions.foreground
+      active.strokeWidth = Math.max(active.strokeWidth, toolOptions.shapeStrokeWidth || 4)
+      pushHistory(doc, 'Fill shape stroke')
+    } else {
+      active.fill = toolOptions.foreground
+      pushHistory(doc, 'Fill shape')
+    }
+    setStatus('Shape color updated')
+    return
+  }
+  if (active.type === 'text') {
+    active.color = toolOptions.foreground
+    pushHistory(doc, 'Fill text color')
+    setStatus('Text color updated')
+    return
+  }
+  if (active.type === 'frame') {
+    active.fill = toolOptions.foreground
+    pushHistory(doc, 'Fill frame')
+    setStatus('Frame color updated')
+    return
+  }
+  if (active.type !== 'raster') {
+    setError('Fill is not available for this layer type')
+    return
+  }
+  const layer = await ensureRasterLayer(active)
   const { canvas, ctx } = await layerCanvas(layer)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
   const x = Math.floor(point.x - layer.transform.x)
   const y = Math.floor(point.y - layer.transform.y)
-  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) return
+  if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+    setError('Click inside the active raster layer to fill it')
+    return
+  }
   const startIndex = (y * canvas.width + x) * 4
   const target = [data[startIndex], data[startIndex + 1], data[startIndex + 2], data[startIndex + 3]]
   const fill = hexToRgba(toolOptions.foreground)
@@ -1569,6 +1866,7 @@ function beforeUnload(event: BeforeUnloadEvent) {
 onMounted(init)
 
 onBeforeUnmount(() => {
+  cleanupGlobalPointerListeners()
   window.removeEventListener('keydown', handleKeydown)
   window.removeEventListener('beforeunload', beforeUnload)
   window.removeEventListener('paste', handlePaste)
@@ -1670,6 +1968,45 @@ onBeforeUnmount(() => {
         <label>Feather <input v-model.number="toolOptions.feather" type="number" min="0" /></label>
       </template>
       <span v-else>{{ activeTool }} tool</span>
+
+      <div v-if="activeShapeLayer" class="selected-layer-options">
+        <span>Selected shape</span>
+        <label>Type
+          <select v-model="activeShapeLayer.shape" @change="pushHistory(activeDocument, 'Shape type')">
+            <option value="rectangle">Rectangle</option>
+            <option value="rounded-rectangle">Rounded rectangle</option>
+            <option value="ellipse">Ellipse</option>
+            <option value="line">Line</option>
+            <option value="arrow">Arrow</option>
+            <option value="star">Star</option>
+            <option value="polygon">Polygon</option>
+          </select>
+        </label>
+        <label>Fill <input v-model="activeShapeLayer.fill" type="color" @change="pushHistory(activeDocument, 'Shape fill')" /></label>
+        <label>Stroke <input v-model="activeShapeLayer.stroke" type="color" @change="pushHistory(activeDocument, 'Shape stroke')" /></label>
+        <label>Stroke W <input v-model.number="activeShapeLayer.strokeWidth" type="number" min="0" @change="pushHistory(activeDocument, 'Shape stroke width')" /></label>
+      </div>
+
+      <div v-else-if="activeTextLayer" class="selected-layer-options">
+        <span>Selected text</span>
+        <label>Text <input v-model="activeTextLayer.text" @change="pushHistory(activeDocument, 'Edit text')" /></label>
+        <label>Color <input v-model="activeTextLayer.color" type="color" @change="pushHistory(activeDocument, 'Text color')" /></label>
+        <label>Size <input v-model.number="activeTextLayer.fontSize" type="number" min="8" @change="pushHistory(activeDocument, 'Text size')" /></label>
+        <label>Font <input v-model="activeTextLayer.fontFamily" @change="pushHistory(activeDocument, 'Text font')" /></label>
+      </div>
+
+      <div v-else-if="activeFrameLayer" class="selected-layer-options">
+        <span>Selected frame</span>
+        <label>Fill <input v-model="activeFrameLayer.fill" type="color" @change="pushHistory(activeDocument, 'Frame fill')" /></label>
+        <label>Shape
+          <select v-model="activeFrameLayer.shape" @change="pushHistory(activeDocument, 'Frame shape')">
+            <option value="rectangle">Rectangle</option>
+            <option value="rounded-rectangle">Rounded rectangle</option>
+            <option value="ellipse">Ellipse</option>
+          </select>
+        </label>
+      </div>
+
       <button class="button secondary" type="button" :disabled="!canUndo" @click="undo"><Undo2 aria-hidden="true" />Undo</button>
       <button class="button secondary" type="button" :disabled="!canRedo" @click="redo"><Redo2 aria-hidden="true" />Redo</button>
       <button class="button primary" type="button" @click="exportDocument('png')"><Download aria-hidden="true" />Quick PNG</button>
@@ -1699,15 +2036,37 @@ onBeforeUnmount(() => {
             transform: `translate(${activeDocument.viewport.panX}px, ${activeDocument.viewport.panY}px)`
           }"
         >
-          <canvas
-            ref="canvasRef"
-            class="editor-main-canvas"
-            @pointerdown="pointerDown"
-            @pointermove="pointerMove"
-            @pointerup="pointerUp"
-            @pointercancel="pointerUp"
-            @pointerleave="pointerUp"
-          />
+          <div class="editor-canvas-wrap" :style="canvasWrapStyle">
+            <canvas
+              ref="canvasRef"
+              class="editor-main-canvas"
+              @pointerdown="pointerDown"
+              @pointermove="pointerMove"
+              @pointerup="pointerUp"
+              @pointercancel="pointerUp"
+              @pointerleave="pointerUp"
+            />
+            <div
+              v-if="transformOverlayStyle"
+              class="transform-overlay"
+              :style="transformOverlayStyle"
+              @pointermove="pointerMove"
+              @pointerup="pointerUp"
+              @pointercancel="pointerUp"
+            >
+              <button
+                v-for="handle in resizeHandles"
+                :key="handle"
+                type="button"
+                class="transform-handle"
+                :class="`handle-${handle}`"
+                :style="transformHandleStyle(handle)"
+                :aria-label="`Resize ${handle}`"
+                :title="`Resize ${handle}`"
+                @pointerdown.stop.prevent="startResizeFromHandle($event, handle)"
+              />
+            </div>
+          </div>
         </div>
         <div v-if="busy" class="editor-busy">{{ busyLabel }}...</div>
       </main>
@@ -1829,6 +2188,24 @@ onBeforeUnmount(() => {
                   <option v-for="mode in SUPPORTED_BLEND_MODES" :key="mode" :value="mode">{{ mode }}</option>
                 </select>
               </label>
+              <div v-if="activeShapeLayer" class="object-controls">
+                <h3>Shape</h3>
+                <div class="compact-grid two-col">
+                  <label>Fill <input v-model="activeShapeLayer.fill" type="color" @change="pushHistory(activeDocument, 'Shape fill')" /></label>
+                  <label>Stroke <input v-model="activeShapeLayer.stroke" type="color" @change="pushHistory(activeDocument, 'Shape stroke')" /></label>
+                  <label>Stroke W <input v-model.number="activeShapeLayer.strokeWidth" type="number" min="0" @change="pushHistory(activeDocument, 'Shape stroke width')" /></label>
+                  <label>Radius <input v-model.number="activeShapeLayer.radius" type="number" min="0" @change="pushHistory(activeDocument, 'Shape radius')" /></label>
+                  <label>Sides <input v-model.number="activeShapeLayer.sides" type="number" min="3" max="24" @change="pushHistory(activeDocument, 'Shape sides')" /></label>
+                </div>
+              </div>
+              <div v-else-if="activeTextLayer" class="object-controls">
+                <h3>Text</h3>
+                <label>Content <input v-model="activeTextLayer.text" @change="pushHistory(activeDocument, 'Edit text')" /></label>
+                <div class="compact-grid two-col">
+                  <label>Color <input v-model="activeTextLayer.color" type="color" @change="pushHistory(activeDocument, 'Text color')" /></label>
+                  <label>Size <input v-model.number="activeTextLayer.fontSize" type="number" min="8" @change="pushHistory(activeDocument, 'Text size')" /></label>
+                </div>
+              </div>
               <div class="compact-grid">
                 <button class="button secondary" type="button" @click="orderActiveLayer('backward')">Back</button>
                 <button class="button secondary" type="button" @click="orderActiveLayer('forward')">Forward</button>
