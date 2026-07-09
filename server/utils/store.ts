@@ -47,7 +47,28 @@ export type LinkClickRecord = {
   clickedAt: string
   referrer: string
   userAgent: string
+  ip?: string
   ipHash: string
+  method?: string
+  protocol?: string
+  host?: string
+  path?: string
+  query?: Record<string, string | string[]>
+  utm?: Record<string, string>
+  headers?: Record<string, string>
+  geo?: Record<string, string>
+  network?: Record<string, string>
+  browser?: {
+    name: string
+    version: string
+    os: string
+    device: string
+  }
+  bot?: {
+    isBot: boolean
+    reason: string
+  }
+  client?: Record<string, unknown>
 }
 
 export type RedirectLinkRecord = {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ArrowRightLeft, Download, FileImage, Upload, Wand2 } from 'lucide-vue-next'
 
-type VectorPreset = 'logo' | 'mono' | 'color'
+type VectorPreset = 'crisp' | 'logo' | 'mono' | 'color'
 
 const svgText = ref(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 180">
   <rect width="500" height="180" rx="24" fill="#0f766e"/>
@@ -15,10 +15,14 @@ const rasterName = ref('')
 const rasterPreview = ref('')
 const rasterObjectUrl = ref('')
 const vectorSvg = ref('')
-const vectorPreset = ref<VectorPreset>('logo')
-const colorCount = ref(5)
-const simplify = ref(1)
-const despeckle = ref(8)
+const vectorPreset = ref<VectorPreset>('crisp')
+const colorCount = ref(6)
+const simplify = ref(0.7)
+const despeckle = ref(4)
+const traceMaxSide = ref(2200)
+const sharpenEdges = ref(true)
+const alphaThreshold = ref(18)
+const contrastBoost = ref(18)
 const vectorError = ref('')
 const converting = ref(false)
 const autoTrace = ref(true)
@@ -124,6 +128,56 @@ function normalizeForMonochrome(imageData: ImageData) {
   return imageData
 }
 
+function preprocessLogoImageData(imageData: ImageData) {
+  const data = imageData.data
+  const contrast = contrastBoost.value / 100
+  const factor = (259 * (contrast * 255 + 255)) / (255 * (259 - contrast * 255))
+
+  for (let index = 0; index < data.length; index += 4) {
+    if (data[index + 3] <= alphaThreshold.value) {
+      data[index + 3] = 0
+      continue
+    }
+
+    if (data[index + 3] > 255 - alphaThreshold.value) {
+      data[index + 3] = 255
+    }
+
+    data[index] = Math.max(0, Math.min(255, factor * (data[index] - 128) + 128))
+    data[index + 1] = Math.max(0, Math.min(255, factor * (data[index + 1] - 128) + 128))
+    data[index + 2] = Math.max(0, Math.min(255, factor * (data[index + 2] - 128) + 128))
+  }
+
+  return imageData
+}
+
+function sharpenImageData(imageData: ImageData) {
+  const source = new Uint8ClampedArray(imageData.data)
+  const { width, height, data } = imageData
+  const matrix = [0, -1, 0, -1, 5, -1, 0, -1, 0]
+
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      const index = (y * width + x) * 4
+
+      for (let channel = 0; channel < 3; channel += 1) {
+        let value = 0
+
+        for (let ky = -1; ky <= 1; ky += 1) {
+          for (let kx = -1; kx <= 1; kx += 1) {
+            const sourceIndex = ((y + ky) * width + x + kx) * 4 + channel
+            value += source[sourceIndex] * matrix[(ky + 1) * 3 + (kx + 1)]
+          }
+        }
+
+        data[index + channel] = Math.max(0, Math.min(255, value))
+      }
+    }
+  }
+
+  return imageData
+}
+
 async function handleRasterUpload(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
@@ -154,7 +208,7 @@ async function vectorizeRaster() {
     image.src = rasterPreview.value
     await image.decode()
 
-    const maxSide = 1200
+    const maxSide = traceMaxSide.value
     const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight))
     const width = Math.max(1, Math.round(image.naturalWidth * ratio))
     const height = Math.max(1, Math.round(image.naturalHeight * ratio))
@@ -164,8 +218,18 @@ async function vectorizeRaster() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true })
     if (!ctx) return
 
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
     ctx.drawImage(image, 0, 0, width, height)
     let imageData = ctx.getImageData(0, 0, width, height)
+
+    if (vectorPreset.value === 'crisp' || vectorPreset.value === 'logo') {
+      imageData = preprocessLogoImageData(imageData)
+    }
+
+    if (sharpenEdges.value && vectorPreset.value !== 'color') {
+      imageData = sharpenImageData(imageData)
+    }
 
     if (vectorPreset.value === 'mono') {
       imageData = normalizeForMonochrome(imageData)
@@ -174,27 +238,45 @@ async function vectorizeRaster() {
     const module = await import('imagetracerjs')
     const ImageTracer = (module as any).default || module
     const options =
-      vectorPreset.value === 'mono'
+      vectorPreset.value === 'crisp'
+        ? {
+            numberofcolors: colorCount.value,
+            ltres: 0.22 * simplify.value,
+            qtres: 0.22 * simplify.value,
+            pathomit: Math.max(0, despeckle.value),
+            colorsampling: 0,
+            colorquantcycles: 6,
+            blurradius: 0,
+            blurdelta: 0,
+            scale: 1,
+            roundcoords: 2,
+            strokewidth: 0,
+            linefilter: false
+          }
+        : vectorPreset.value === 'mono'
         ? {
             numberofcolors: 2,
-            ltres: 0.7 * simplify.value,
-            qtres: 0.7 * simplify.value,
+            ltres: 0.35 * simplify.value,
+            qtres: 0.35 * simplify.value,
             pathomit: despeckle.value,
             colorsampling: 0,
+            blurradius: 0,
             scale: 1,
+            roundcoords: 2,
             strokewidth: 0
           }
         : vectorPreset.value === 'logo'
           ? {
               numberofcolors: colorCount.value,
-              ltres: 0.55 * simplify.value,
-              qtres: 0.55 * simplify.value,
+              ltres: 0.4 * simplify.value,
+              qtres: 0.4 * simplify.value,
               pathomit: despeckle.value,
-              colorsampling: 2,
-              colorquantcycles: 4,
-              blurradius: 1,
-              blurdelta: 18,
+              colorsampling: 1,
+              colorquantcycles: 5,
+              blurradius: 0,
+              blurdelta: 0,
               scale: 1,
+              roundcoords: 2,
               strokewidth: 0
             }
           : {
@@ -205,6 +287,7 @@ async function vectorizeRaster() {
               colorsampling: 2,
               colorquantcycles: 5,
               scale: 1,
+              roundcoords: 2,
               strokewidth: 0
             }
 
@@ -323,7 +406,8 @@ onBeforeUnmount(() => {
         <div class="field">
           <label for="vector-preset">Preset</label>
           <select id="vector-preset" v-model="vectorPreset">
-            <option value="logo">Business logo</option>
+            <option value="crisp">Crisp logo</option>
+            <option value="logo">Balanced logo</option>
             <option value="mono">Single-color mark</option>
             <option value="color">Full-color artwork</option>
           </select>
@@ -342,6 +426,22 @@ onBeforeUnmount(() => {
             <label for="despeckle">Cleanup</label>
             <input id="despeckle" v-model.number="despeckle" type="range" min="0" max="24" />
           </div>
+          <div class="field">
+            <label for="trace-size">Detail</label>
+            <select id="trace-size" v-model.number="traceMaxSide">
+              <option :value="1200">Standard</option>
+              <option :value="2200">Sharp</option>
+              <option :value="3200">Maximum</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="contrast-boost">Contrast</label>
+            <input id="contrast-boost" v-model.number="contrastBoost" type="range" min="0" max="42" />
+          </div>
+          <div class="field">
+            <label for="alpha-threshold">Alpha</label>
+            <input id="alpha-threshold" v-model.number="alphaThreshold" type="range" min="0" max="80" />
+          </div>
         </div>
 
         <label class="row" style="margin-bottom: 14px">
@@ -351,6 +451,10 @@ onBeforeUnmount(() => {
         <label class="row" style="margin-bottom: 14px">
           <input v-model="syncVectorToRenderer" type="checkbox" />
           Send traced SVG to PNG renderer
+        </label>
+        <label class="row" style="margin-bottom: 14px">
+          <input v-model="sharpenEdges" type="checkbox" />
+          Sharpen source before tracing
         </label>
 
         <div class="button-row">

@@ -13,6 +13,12 @@ type LinkRecord = {
     lastClickAt: string | null
     byDay: Record<string, number>
     referrers: { referrer: string; count: number }[]
+    countries: { label: string; count: number }[]
+    regions: { label: string; count: number }[]
+    browsers: { label: string; count: number }[]
+    operatingSystems: { label: string; count: number }[]
+    devices: { label: string; count: number }[]
+    sources: { label: string; count: number }[]
     recentClicks: any[]
   }
 }
@@ -74,6 +80,30 @@ function getHostname(target: string) {
   } catch {
     return target
   }
+}
+
+function firstLabel(items: { label: string; count: number }[]) {
+  return items[0]?.label || 'Unknown'
+}
+
+function getClickLocation(click: any) {
+  return (
+    click.geo?.['cf-city'] ||
+    click.geo?.['x-vercel-ip-city'] ||
+    click.geo?.['cf-region'] ||
+    click.geo?.['x-vercel-ip-region'] ||
+    click.geo?.['cf-ipcountry'] ||
+    click.geo?.['x-vercel-ip-country'] ||
+    'Unknown'
+  )
+}
+
+function getClientViewport(click: any) {
+  const viewport = click.client?.viewport
+  if (!viewport?.width || !viewport?.height) {
+    return 'Unknown'
+  }
+  return `${viewport.width}x${viewport.height}@${viewport.devicePixelRatio || 1}`
 }
 </script>
 
@@ -195,7 +225,26 @@ function getHostname(target: string) {
           </div>
         </div>
 
-        <div class="grid two" style="margin-top: 14px">
+        <div class="metrics" style="margin-top: 14px">
+          <div class="metric">
+            <span>Country</span>
+            <strong>{{ firstLabel(link.analytics.countries) }}</strong>
+          </div>
+          <div class="metric">
+            <span>Browser</span>
+            <strong>{{ firstLabel(link.analytics.browsers) }}</strong>
+          </div>
+          <div class="metric">
+            <span>Device</span>
+            <strong>{{ firstLabel(link.analytics.devices) }}</strong>
+          </div>
+          <div class="metric">
+            <span>Source</span>
+            <strong>{{ firstLabel(link.analytics.sources) }}</strong>
+          </div>
+        </div>
+
+        <div class="grid three" style="margin-top: 14px">
           <div>
             <h3>Top Referrers</h3>
             <div v-if="!link.analytics.referrers.length" class="empty-state" style="min-height: 120px">
@@ -213,20 +262,118 @@ function getHostname(target: string) {
             </div>
           </div>
           <div>
-            <h3>Recent Clicks</h3>
-            <div v-if="!link.analytics.recentClicks.length" class="empty-state" style="min-height: 120px">
-              No recent clicks.
+            <h3>Browsers</h3>
+            <div v-if="!link.analytics.browsers.length" class="empty-state" style="min-height: 120px">
+              No browser data.
             </div>
             <div v-else class="table-wrap">
               <table>
                 <tbody>
-                  <tr v-for="click in link.analytics.recentClicks.slice(0, 5)" :key="click.id">
-                    <td>{{ new Date(click.clickedAt).toLocaleString() }}</td>
-                    <td class="mono">{{ click.userAgent.slice(0, 42) }}</td>
+                  <tr v-for="browser in link.analytics.browsers" :key="browser.label">
+                    <td>{{ browser.label }}</td>
+                    <td>{{ browser.count }}</td>
                   </tr>
                 </tbody>
               </table>
             </div>
+          </div>
+          <div>
+            <h3>Countries</h3>
+            <div v-if="!link.analytics.countries.length" class="empty-state" style="min-height: 120px">
+              No location data.
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <tbody>
+                  <tr v-for="country in link.analytics.countries" :key="country.label">
+                    <td>{{ country.label }}</td>
+                    <td>{{ country.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="grid three" style="margin-top: 14px">
+          <div>
+            <h3>Devices</h3>
+            <div v-if="!link.analytics.devices.length" class="empty-state" style="min-height: 120px">
+              No device data.
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <tbody>
+                  <tr v-for="device in link.analytics.devices" :key="device.label">
+                    <td>{{ device.label }}</td>
+                    <td>{{ device.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3>Operating Systems</h3>
+            <div v-if="!link.analytics.operatingSystems.length" class="empty-state" style="min-height: 120px">
+              No OS data.
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <tbody>
+                  <tr v-for="os in link.analytics.operatingSystems" :key="os.label">
+                    <td>{{ os.label }}</td>
+                    <td>{{ os.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <h3>Sources</h3>
+            <div v-if="!link.analytics.sources.length" class="empty-state" style="min-height: 120px">
+              No campaign data.
+            </div>
+            <div v-else class="table-wrap">
+              <table>
+                <tbody>
+                  <tr v-for="source in link.analytics.sources" :key="source.label">
+                    <td>{{ source.label }}</td>
+                    <td>{{ source.count }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 14px">
+          <h3>Recent Clicks</h3>
+          <div v-if="!link.analytics.recentClicks.length" class="empty-state" style="min-height: 120px">
+            No recent clicks.
+          </div>
+          <div v-else class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>IP</th>
+                  <th>Location</th>
+                  <th>Browser</th>
+                  <th>Viewport</th>
+                  <th>Referrer</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="click in link.analytics.recentClicks.slice(0, 8)" :key="click.id">
+                  <td>{{ new Date(click.clickedAt).toLocaleString() }}</td>
+                  <td class="mono">{{ click.ip || click.ipHash }}</td>
+                  <td>{{ getClickLocation(click) }}</td>
+                  <td>{{ click.browser?.name || 'Unknown' }} / {{ click.browser?.os || 'Unknown' }}</td>
+                  <td class="mono">{{ getClientViewport(click) }}</td>
+                  <td class="mono">{{ (click.referrer || 'Direct').slice(0, 52) }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
       </article>
