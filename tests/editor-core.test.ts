@@ -26,6 +26,7 @@ import {
 } from '../utils/editor-core'
 import {
   DEFAULT_VECTOR_SETTINGS,
+  createEmbeddedRasterSvg,
   createVectorTraceOptions,
   getTraceSamplingRatio,
   preprocessLogoImageData,
@@ -177,16 +178,25 @@ describe('rendering helpers', () => {
 })
 
 describe('vector conversion helpers', () => {
-  test('uses a detailed, deterministic color trace by default', () => {
-    expect(DEFAULT_VECTOR_SETTINGS.preset).toBe('color')
+  test('uses pixel-faithful SVG output by default', () => {
+    expect(DEFAULT_VECTOR_SETTINGS.preset).toBe('exact')
     expect(DEFAULT_VECTOR_SETTINGS.colorCount).toBeGreaterThanOrEqual(24)
     expect(DEFAULT_VECTOR_SETTINGS.sharpenEdges).toBe(false)
+
+    const svg = createEmbeddedRasterSvg('data:image/png;base64,aGVsbG8=', 170, 145)
+    expect(svg).toContain('width="170" height="145"')
+    expect(svg).toContain('<image')
+    expect(svg).toContain('data:image/png;base64,aGVsbG8=')
 
     const options = createVectorTraceOptions('color', 32, 0.9, 6)
     expect(options.numberofcolors).toBe(32)
     expect(options.colorsampling).toBe(2)
     expect(options.colorquantcycles).toBeGreaterThanOrEqual(7)
     expect(options.blurradius).toBe(1)
+  })
+
+  test('rejects untrusted image URLs in exact output', () => {
+    expect(() => createEmbeddedRasterSvg('https://example.com/image.png', 10, 10)).toThrow()
   })
 
   test('oversamples small artwork without changing its SVG dimensions', () => {

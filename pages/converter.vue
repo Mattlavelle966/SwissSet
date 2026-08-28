@@ -2,6 +2,7 @@
 import { ArrowRightLeft, Download, FileImage, Upload, Wand2 } from 'lucide-vue-next'
 import {
   DEFAULT_VECTOR_SETTINGS,
+  createEmbeddedRasterSvg,
   createVectorTraceOptions,
   getTraceSamplingRatio,
   normalizeForMonochrome,
@@ -21,12 +22,14 @@ const transparentPng = ref(true)
 const rasterName = ref('')
 const rasterPreview = ref('')
 const rasterObjectUrl = ref('')
+const rasterDataUrl = ref('')
 const vectorSvg = ref('')
+const vectorPreviewUrl = ref('')
 const vectorPreset = ref<VectorPreset>(DEFAULT_VECTOR_SETTINGS.preset)
 const colorCount = ref(DEFAULT_VECTOR_SETTINGS.colorCount)
 const simplify = ref(DEFAULT_VECTOR_SETTINGS.simplify)
 const despeckle = ref(DEFAULT_VECTOR_SETTINGS.despeckle)
-const traceMaxSide = ref(2200)
+const traceMaxSide = ref(1000)
 const sharpenEdges = ref(DEFAULT_VECTOR_SETTINGS.sharpenEdges)
 const alphaThreshold = ref(DEFAULT_VECTOR_SETTINGS.alphaThreshold)
 const contrastBoost = ref(DEFAULT_VECTOR_SETTINGS.contrastBoost)
@@ -35,11 +38,18 @@ const converting = ref(false)
 const autoTrace = ref(true)
 const syncVectorToRenderer = ref(true)
 
-const vectorPreview = computed(() =>
-  vectorSvg.value
-    ? `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(vectorSvg.value)))}`
-    : ''
-)
+watch(vectorSvg, (source) => {
+  if (vectorPreviewUrl.value) {
+    URL.revokeObjectURL(vectorPreviewUrl.value)
+    vectorPreviewUrl.value = ''
+  }
+
+  if (source) {
+    vectorPreviewUrl.value = URL.createObjectURL(
+      new Blob([source], { type: 'image/svg+xml' })
+    )
+  }
+})
 
 function downloadBlob(content: string | Blob, filename: string, type = 'text/plain') {
   const blob = content instanceof Blob ? content : new Blob([content], { type })
@@ -131,6 +141,12 @@ async function handleRasterUpload(event: Event) {
 
   rasterName.value = file.name.replace(/\.[^.]+$/, '')
   rasterObjectUrl.value = URL.createObjectURL(file)
+  rasterDataUrl.value = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('Image could not be read'))
+    reader.readAsDataURL(file)
+  })
   rasterPreview.value = rasterObjectUrl.value
   vectorSvg.value = ''
 
@@ -150,6 +166,20 @@ async function vectorizeRaster() {
     const image = new Image()
     image.src = rasterPreview.value
     await image.decode()
+
+    if (vectorPreset.value === 'exact') {
+      vectorSvg.value = createEmbeddedRasterSvg(
+        rasterDataUrl.value,
+        image.naturalWidth,
+        image.naturalHeight
+      )
+
+      if (syncVectorToRenderer.value) {
+        svgText.value = vectorSvg.value
+        await svgToPng()
+      }
+      return
+    }
 
     const maxSide = traceMaxSide.value
     const ratio = getTraceSamplingRatio(
@@ -226,6 +256,9 @@ onBeforeUnmount(() => {
   if (rasterObjectUrl.value) {
     URL.revokeObjectURL(rasterObjectUrl.value)
   }
+  if (vectorPreviewUrl.value) {
+    URL.revokeObjectURL(vectorPreviewUrl.value)
+  }
 })
 </script>
 
@@ -237,7 +270,7 @@ onBeforeUnmount(() => {
         <h1>Raster and vector exchange</h1>
         <p class="lead">
           Convert in both directions: SVG to PNG exports, and PNG/JPG/WebP source
-          images into editable SVG paths.
+          images into pixel-faithful SVGs or editable traced paths.
         </p>
       </div>
     </header>
@@ -310,14 +343,23 @@ onBeforeUnmount(() => {
         <div class="field">
           <label for="vector-preset">Preset</label>
           <select id="vector-preset" v-model="vectorPreset">
-            <option value="color">Detailed color (recommended)</option>
+            <option value="exact">Exact appearance (recommended)</option>
+            <option value="color">Detailed editable color</option>
             <option value="crisp">Crisp flat-color logo</option>
             <option value="logo">Balanced logo</option>
             <option value="mono">Single-color mark</option>
           </select>
         </div>
 
-        <div class="compact-grid">
+        <p
+          v-if="vectorPreset === 'exact'"
+          style="margin: -2px 0 16px; color: var(--text-muted); font-size: 0.86rem"
+        >
+          Preserves the original image exactly inside an SVG. Choose an editable preset
+          when you specifically need vector paths.
+        </p>
+
+        <div v-else class="compact-grid">
           <div class="field">
             <label for="color-count">Colors</label>
             <input id="color-count" v-model.number="colorCount" type="range" min="2" max="64" />
@@ -334,9 +376,9 @@ onBeforeUnmount(() => {
           <div class="field">
             <label for="trace-size">Detail</label>
             <select id="trace-size" v-model.number="traceMaxSide">
-              <option :value="1200">Standard</option>
-              <option :value="2200">Sharp</option>
-              <option :value="3200">Maximum</option>
+              <option :value="800">Standard</option>
+              <option :value="1000">Sharp</option>
+              <option :value="1600">Maximum</option>
             </select>
           </div>
           <div class="field">
@@ -351,13 +393,13 @@ onBeforeUnmount(() => {
 
         <label class="row" style="margin-bottom: 14px">
           <input v-model="autoTrace" type="checkbox" />
-          Trace immediately after upload
+          {{ vectorPreset === 'exact' ? 'Create immediately after upload' : 'Trace immediately after upload' }}
         </label>
         <label class="row" style="margin-bottom: 14px">
           <input v-model="syncVectorToRenderer" type="checkbox" />
-          Send traced SVG to PNG renderer
+          Send generated SVG to PNG renderer
         </label>
-        <label class="row" style="margin-bottom: 14px">
+        <label v-if="vectorPreset !== 'exact'" class="row" style="margin-bottom: 14px">
           <input v-model="sharpenEdges" type="checkbox" />
           Sharpen source before tracing
         </label>
@@ -370,7 +412,7 @@ onBeforeUnmount(() => {
             @click="vectorizeRaster"
           >
             <Wand2 aria-hidden="true" />
-            {{ converting ? 'Tracing...' : 'Trace SVG' }}
+            {{ converting ? 'Converting...' : vectorPreset === 'exact' ? 'Create SVG' : 'Trace SVG' }}
           </button>
           <button
             class="button secondary"
@@ -398,7 +440,7 @@ onBeforeUnmount(() => {
             <span v-else>Raster source.</span>
           </div>
           <div class="preview-frame">
-            <img v-if="vectorPreview" :src="vectorPreview" alt="Vector output preview" />
+            <img v-if="vectorPreviewUrl" :src="vectorPreviewUrl" alt="Vector output preview" />
             <span v-else>SVG output.</span>
           </div>
         </div>

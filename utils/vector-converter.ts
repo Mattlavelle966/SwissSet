@@ -1,4 +1,4 @@
-export type VectorPreset = 'crisp' | 'logo' | 'mono' | 'color'
+export type VectorPreset = 'exact' | 'crisp' | 'logo' | 'mono' | 'color'
 
 export type VectorTraceOptions = {
   numberofcolors: number
@@ -17,13 +17,23 @@ export type VectorTraceOptions = {
 }
 
 export const DEFAULT_VECTOR_SETTINGS = {
-  preset: 'color' as VectorPreset,
+  preset: 'exact' as VectorPreset,
   colorCount: 32,
   simplify: 0.9,
   despeckle: 6,
   sharpenEdges: false,
   alphaThreshold: 18,
   contrastBoost: 0
+}
+
+export function createEmbeddedRasterSvg(dataUrl: string, width: number, height: number) {
+  if (!/^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(dataUrl)) {
+    throw new Error('Unsupported raster image data')
+  }
+
+  const safeWidth = Math.max(1, Math.round(width))
+  const safeHeight = Math.max(1, Math.round(height))
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${safeWidth}" height="${safeHeight}" viewBox="0 0 ${safeWidth} ${safeHeight}"><image width="${safeWidth}" height="${safeHeight}" preserveAspectRatio="none" href="${dataUrl}"/></svg>`
 }
 
 function clamp(value: number, minimum: number, maximum: number) {
@@ -43,6 +53,9 @@ export function createVectorTraceOptions(
   despeckle: number,
   samplingRatio = 1
 ): VectorTraceOptions {
+  if (preset === 'exact') {
+    throw new Error('Exact appearance does not use path tracing options')
+  }
   const colors = Math.round(clamp(colorCount, 2, 64))
   const smoothing = clamp(simplify, 0.5, 2)
   const cleanup = Math.round(clamp(despeckle, 0, 24))
