@@ -24,6 +24,13 @@ import {
   setActiveLayer,
   undoDocument
 } from '../utils/editor-core'
+import {
+  DEFAULT_VECTOR_SETTINGS,
+  createVectorTraceOptions,
+  getTraceSamplingRatio,
+  preprocessLogoImageData,
+  sharpenImageData
+} from '../utils/vector-converter'
 
 const transparentPng = 'data:image/png;base64,iVBORw0KGgo='
 
@@ -166,5 +173,65 @@ describe('rendering helpers', () => {
     expect(exceedsSafeMemory(2000, 2000)).toBe(false)
     expect(exceedsSafeMemory(9000, 100)).toBe(true)
     expect(exceedsSafeMemory(10000, 10000)).toBe(true)
+  })
+})
+
+describe('vector conversion helpers', () => {
+  test('uses a detailed, deterministic color trace by default', () => {
+    expect(DEFAULT_VECTOR_SETTINGS.preset).toBe('color')
+    expect(DEFAULT_VECTOR_SETTINGS.colorCount).toBeGreaterThanOrEqual(24)
+    expect(DEFAULT_VECTOR_SETTINGS.sharpenEdges).toBe(false)
+
+    const options = createVectorTraceOptions('color', 32, 0.9, 6)
+    expect(options.numberofcolors).toBe(32)
+    expect(options.colorsampling).toBe(2)
+    expect(options.colorquantcycles).toBeGreaterThanOrEqual(7)
+    expect(options.blurradius).toBe(1)
+  })
+
+  test('oversamples small artwork without changing its SVG dimensions', () => {
+    const ratio = getTraceSamplingRatio(170, 145, 2200, 'color')
+    const options = createVectorTraceOptions('color', 32, 0.9, 6, ratio)
+
+    expect(ratio).toBe(4)
+    expect(options.scale).toBe(0.25)
+    expect(options.ltres).toBeCloseTo(7.2)
+  })
+
+  test('scales oversized input back to its original output dimensions', () => {
+    const ratio = getTraceSamplingRatio(4400, 2200, 2200, 'color')
+    const options = createVectorTraceOptions('color', 32, 0.9, 6, ratio)
+
+    expect(ratio).toBe(0.5)
+    expect(options.scale).toBe(2)
+  })
+
+  test('never sends a sub-eight-color fixed palette to a color trace', () => {
+    const options = createVectorTraceOptions('crisp', 4, 1, 4)
+    expect(options.numberofcolors).toBe(8)
+    expect(options.colorsampling).toBe(2)
+  })
+
+  test('removes hidden colors when alpha is discarded', () => {
+    const imageData = {
+      width: 1,
+      height: 1,
+      data: new Uint8ClampedArray([25, 190, 80, 5])
+    } as ImageData
+
+    preprocessLogoImageData(imageData, 0, 18)
+    expect([...imageData.data]).toEqual([0, 0, 0, 0])
+  })
+
+  test('optional sharpening is restrained instead of clipping edge halos', () => {
+    const imageData = {
+      width: 3,
+      height: 3,
+      data: new Uint8ClampedArray(Array(9).fill([100, 100, 100, 255]).flat())
+    } as ImageData
+    imageData.data.set([120, 120, 120, 255], 16)
+
+    sharpenImageData(imageData)
+    expect(imageData.data[16]).toBe(140)
   })
 })

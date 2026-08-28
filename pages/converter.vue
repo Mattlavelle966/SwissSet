@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { ArrowRightLeft, Download, FileImage, Upload, Wand2 } from 'lucide-vue-next'
-
-type VectorPreset = 'crisp' | 'logo' | 'mono' | 'color'
+import {
+  DEFAULT_VECTOR_SETTINGS,
+  createVectorTraceOptions,
+  getTraceSamplingRatio,
+  normalizeForMonochrome,
+  preprocessLogoImageData,
+  sharpenImageData,
+  type VectorPreset
+} from '~/utils/vector-converter'
 
 const svgText = ref(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 180">
   <rect width="500" height="180" rx="24" fill="#0f766e"/>
@@ -15,14 +22,14 @@ const rasterName = ref('')
 const rasterPreview = ref('')
 const rasterObjectUrl = ref('')
 const vectorSvg = ref('')
-const vectorPreset = ref<VectorPreset>('crisp')
-const colorCount = ref(6)
-const simplify = ref(0.7)
-const despeckle = ref(4)
+const vectorPreset = ref<VectorPreset>(DEFAULT_VECTOR_SETTINGS.preset)
+const colorCount = ref(DEFAULT_VECTOR_SETTINGS.colorCount)
+const simplify = ref(DEFAULT_VECTOR_SETTINGS.simplify)
+const despeckle = ref(DEFAULT_VECTOR_SETTINGS.despeckle)
 const traceMaxSide = ref(2200)
-const sharpenEdges = ref(true)
-const alphaThreshold = ref(18)
-const contrastBoost = ref(18)
+const sharpenEdges = ref(DEFAULT_VECTOR_SETTINGS.sharpenEdges)
+const alphaThreshold = ref(DEFAULT_VECTOR_SETTINGS.alphaThreshold)
+const contrastBoost = ref(DEFAULT_VECTOR_SETTINGS.contrastBoost)
 const vectorError = ref('')
 const converting = ref(false)
 const autoTrace = ref(true)
@@ -114,70 +121,6 @@ async function handleSvgUpload(event: Event) {
   await svgToPng()
 }
 
-function normalizeForMonochrome(imageData: ImageData) {
-  const data = imageData.data
-  for (let index = 0; index < data.length; index += 4) {
-    const alpha = data[index + 3]
-    const luminance = data[index] * 0.299 + data[index + 1] * 0.587 + data[index + 2] * 0.114
-    const value = alpha < 20 || luminance > 170 ? 255 : 0
-    data[index] = value
-    data[index + 1] = value
-    data[index + 2] = value
-    data[index + 3] = alpha
-  }
-  return imageData
-}
-
-function preprocessLogoImageData(imageData: ImageData) {
-  const data = imageData.data
-  const contrast = contrastBoost.value / 100
-  const factor = (259 * (contrast * 255 + 255)) / (255 * (259 - contrast * 255))
-
-  for (let index = 0; index < data.length; index += 4) {
-    if (data[index + 3] <= alphaThreshold.value) {
-      data[index + 3] = 0
-      continue
-    }
-
-    if (data[index + 3] > 255 - alphaThreshold.value) {
-      data[index + 3] = 255
-    }
-
-    data[index] = Math.max(0, Math.min(255, factor * (data[index] - 128) + 128))
-    data[index + 1] = Math.max(0, Math.min(255, factor * (data[index + 1] - 128) + 128))
-    data[index + 2] = Math.max(0, Math.min(255, factor * (data[index + 2] - 128) + 128))
-  }
-
-  return imageData
-}
-
-function sharpenImageData(imageData: ImageData) {
-  const source = new Uint8ClampedArray(imageData.data)
-  const { width, height, data } = imageData
-  const matrix = [0, -1, 0, -1, 5, -1, 0, -1, 0]
-
-  for (let y = 1; y < height - 1; y += 1) {
-    for (let x = 1; x < width - 1; x += 1) {
-      const index = (y * width + x) * 4
-
-      for (let channel = 0; channel < 3; channel += 1) {
-        let value = 0
-
-        for (let ky = -1; ky <= 1; ky += 1) {
-          for (let kx = -1; kx <= 1; kx += 1) {
-            const sourceIndex = ((y + ky) * width + x + kx) * 4 + channel
-            value += source[sourceIndex] * matrix[(ky + 1) * 3 + (kx + 1)]
-          }
-        }
-
-        data[index + channel] = Math.max(0, Math.min(255, value))
-      }
-    }
-  }
-
-  return imageData
-}
-
 async function handleRasterUpload(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
@@ -209,7 +152,12 @@ async function vectorizeRaster() {
     await image.decode()
 
     const maxSide = traceMaxSide.value
-    const ratio = Math.min(1, maxSide / Math.max(image.naturalWidth, image.naturalHeight))
+    const ratio = getTraceSamplingRatio(
+      image.naturalWidth,
+      image.naturalHeight,
+      maxSide,
+      vectorPreset.value
+    )
     const width = Math.max(1, Math.round(image.naturalWidth * ratio))
     const height = Math.max(1, Math.round(image.naturalHeight * ratio))
     const canvas = document.createElement('canvas')
@@ -223,9 +171,11 @@ async function vectorizeRaster() {
     ctx.drawImage(image, 0, 0, width, height)
     let imageData = ctx.getImageData(0, 0, width, height)
 
-    if (vectorPreset.value === 'crisp' || vectorPreset.value === 'logo') {
-      imageData = preprocessLogoImageData(imageData)
-    }
+    imageData = preprocessLogoImageData(
+      imageData,
+      vectorPreset.value === 'color' ? 0 : contrastBoost.value,
+      alphaThreshold.value
+    )
 
     if (sharpenEdges.value && vectorPreset.value !== 'color') {
       imageData = sharpenImageData(imageData)
@@ -237,59 +187,13 @@ async function vectorizeRaster() {
 
     const module = await import('imagetracerjs')
     const ImageTracer = (module as any).default || module
-    const options =
-      vectorPreset.value === 'crisp'
-        ? {
-            numberofcolors: colorCount.value,
-            ltres: 0.22 * simplify.value,
-            qtres: 0.22 * simplify.value,
-            pathomit: Math.max(0, despeckle.value),
-            colorsampling: 0,
-            colorquantcycles: 6,
-            blurradius: 0,
-            blurdelta: 0,
-            scale: 1,
-            roundcoords: 2,
-            strokewidth: 0,
-            linefilter: false
-          }
-        : vectorPreset.value === 'mono'
-        ? {
-            numberofcolors: 2,
-            ltres: 0.35 * simplify.value,
-            qtres: 0.35 * simplify.value,
-            pathomit: despeckle.value,
-            colorsampling: 0,
-            blurradius: 0,
-            scale: 1,
-            roundcoords: 2,
-            strokewidth: 0
-          }
-        : vectorPreset.value === 'logo'
-          ? {
-              numberofcolors: colorCount.value,
-              ltres: 0.4 * simplify.value,
-              qtres: 0.4 * simplify.value,
-              pathomit: despeckle.value,
-              colorsampling: 1,
-              colorquantcycles: 5,
-              blurradius: 0,
-              blurdelta: 0,
-              scale: 1,
-              roundcoords: 2,
-              strokewidth: 0
-            }
-          : {
-              numberofcolors: Math.max(8, colorCount.value),
-              ltres: 1 * simplify.value,
-              qtres: 1 * simplify.value,
-              pathomit: Math.max(2, despeckle.value / 2),
-              colorsampling: 2,
-              colorquantcycles: 5,
-              scale: 1,
-              roundcoords: 2,
-              strokewidth: 0
-            }
+    const options = createVectorTraceOptions(
+      vectorPreset.value,
+      colorCount.value,
+      simplify.value,
+      despeckle.value,
+      ratio
+    )
 
     vectorSvg.value = ImageTracer.imagedataToSVG(imageData, options)
 
@@ -406,17 +310,18 @@ onBeforeUnmount(() => {
         <div class="field">
           <label for="vector-preset">Preset</label>
           <select id="vector-preset" v-model="vectorPreset">
-            <option value="crisp">Crisp logo</option>
+            <option value="color">Detailed color (recommended)</option>
+            <option value="crisp">Crisp flat-color logo</option>
             <option value="logo">Balanced logo</option>
             <option value="mono">Single-color mark</option>
-            <option value="color">Full-color artwork</option>
           </select>
         </div>
 
         <div class="compact-grid">
           <div class="field">
             <label for="color-count">Colors</label>
-            <input id="color-count" v-model.number="colorCount" type="range" min="2" max="16" />
+            <input id="color-count" v-model.number="colorCount" type="range" min="2" max="64" />
+            <small>{{ colorCount }} colors</small>
           </div>
           <div class="field">
             <label for="simplify">Smooth</label>
